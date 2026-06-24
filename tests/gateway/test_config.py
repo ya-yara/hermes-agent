@@ -924,6 +924,7 @@ class TestLoadGatewayConfig:
 
         guard = config["telegram"]["brevity_guard"]
         assert guard["enabled"] is False
+        assert guard["user_name"] == "user"
         assert guard["soft_chars"] == 1600
         assert guard["hard_chars"] == 3000
         assert guard["target_chars"] == 900

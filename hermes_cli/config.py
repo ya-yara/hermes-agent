@@ -2226,6 +2226,7 @@ DEFAULT_CONFIG = {
         "allowed_chats": "",           # If set, bot ONLY responds in these group/supergroup chat IDs (whitelist)
         "brevity_guard": {
             "enabled": False,
+            "user_name": "user",
             "soft_chars": 1600,
             "hard_chars": 3000,
             "target_chars": 900,

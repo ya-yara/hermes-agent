@@ -15,6 +15,7 @@ from gateway.telegram_brevity_guard import (
 def _cfg(**overrides):
     guard = {
         "enabled": True,
+        "user_name": "user",
         "soft_chars": 80,
         "hard_chars": 160,
         "target_chars": 60,
@@ -272,6 +273,42 @@ def test_prompt_preserves_key_facts_and_hard_instruction():
     assert "90" in combined
     assert any(word in combined.lower() for word in ("hard", "strict", "must", "limit"))
 
+
+def test_prompt_uses_configured_user_name_instead_of_hardcoded_personal_name():
+    messages = build_telegram_brevity_prompt(
+        user_message="summarize",
+        draft_answer="Do the safe option.",
+        target_chars=90,
+        hard_limit=False,
+        user_name="Alex",
+    )
+
+    system = messages[0]["content"]
+    old_hardcoded_name = "S" + "ergey"
+    assert "for Alex" in system
+    assert old_hardcoded_name not in system
+
+
+@pytest.mark.asyncio
+async def test_rewrite_prompt_uses_user_name_from_config():
+    calls = []
+
+    async def fake_llm(**kwargs):
+        calls.append(kwargs)
+        return _FakeResponse("Shorter answer")
+
+    await maybe_rewrite_for_telegram_brevity(
+        platform=Platform.TELEGRAM,
+        outgoing_text=_long_text("custom user"),
+        user_message="summarize",
+        user_config=_cfg(user_name="Alex"),
+        llm_call=fake_llm,
+    )
+
+    system = calls[0]["messages"][0]["content"]
+    old_hardcoded_name = "S" + "ergey"
+    assert "for Alex" in system
+    assert old_hardcoded_name not in system
 
 def test_exact_content_skips_patch_and_json():
     patch_text = "diff --git a/a.py b/a.py\n@@ -1 +1 @@\n-old\n+new\n" + ("x" * 120)

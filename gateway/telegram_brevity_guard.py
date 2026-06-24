@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BREVITY_GUARD: dict[str, Any] = {
     "enabled": False,
+    "user_name": "user",
     "soft_chars": 1600,
     "hard_chars": 3000,
     "target_chars": 900,
@@ -76,6 +77,13 @@ def _coerce_positive_int(value: Any, default: int) -> int:
     return parsed if parsed > 0 else default
 
 
+def _coerce_user_name(value: Any, default: str = "user") -> str:
+    if value is None:
+        return default
+    normalized = re.sub(r"\s+", " ", str(value)).strip()
+    return normalized or default
+
+
 def resolve_brevity_guard_config(user_config: Mapping[str, Any] | None) -> dict[str, Any]:
     """Resolve and normalize Telegram brevity-guard config.
 
@@ -96,6 +104,9 @@ def resolve_brevity_guard_config(user_config: Mapping[str, Any] | None) -> dict[
         resolved[key] = _coerce_bool(resolved.get(key), DEFAULT_BREVITY_GUARD[key])
     for key in _INT_KEYS:
         resolved[key] = _coerce_positive_int(resolved.get(key), DEFAULT_BREVITY_GUARD[key])
+    resolved["user_name"] = _coerce_user_name(
+        resolved.get("user_name"), DEFAULT_BREVITY_GUARD["user_name"]
+    )
 
     return resolved
 
@@ -406,6 +417,7 @@ def build_telegram_brevity_prompt(
     draft_answer: str,
     target_chars: int,
     hard_limit: bool,
+    user_name: str = "user",
 ) -> list[dict[str, str]]:
     """Build the auxiliary rewrite prompt for Telegram delivery."""
 
@@ -415,8 +427,9 @@ def build_telegram_brevity_prompt(
         if hard_limit
         else f"Target <= {target_chars} chars."
     )
+    user_name = _coerce_user_name(user_name)
     system = (
-        "Rewrite the outgoing Telegram message for Sergey. Keep it short, alive, direct, and actionable. "
+        f"Rewrite the outgoing Telegram message for {user_name}. Keep it short, alive, direct, and actionable. "
         "Match the user's language. Preserve decisions, numbers, filenames, commands, warnings, and concrete "
         "conclusions. Do not add new facts, do not invent status, and do not change meaning. "
         "Use an optional offer to expand only when useful. Return only the rewritten message. "
@@ -471,6 +484,7 @@ async def maybe_rewrite_for_telegram_brevity(
         draft_answer=outgoing_text,
         target_chars=target_chars,
         hard_limit=len(outgoing_text or "") > config["hard_chars"],
+        user_name=config["user_name"],
     )
     max_tokens = max(64, min(1200, int(target_chars / 3) + 80))
 
