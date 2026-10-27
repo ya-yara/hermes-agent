@@ -1,0 +1,31 @@
+schema_version: "1"
+
+# Custom build manifest for personal/hermes-agent.
+# Each group = one feature. custom_files lists the new/modified files in this branch.
+# upstream_proxy / upstream_issue: watch these; alert when merged/closed.
+
+groups:
+  - id: telegram-agent-react-tool
+    intent: "Agent can call telegram_react — reaction-only or alongside text"
+    custom_files:
+      - tools/telegram_react_tool.py
+      - tests/tools/test_telegram_react_tool.py
+    upstream_proxy: 28810
+    on_upstream_proxy_merged: alert
+    notes: >
+      Modelled on slack_react (PR #28810). Uses direct Bot API call to
+      setMessageReaction. No modifications to existing files.
+
+  - id: telegram-send-stickers
+    intent: "Agent can send Telegram stickers outbound via send_sticker tool"
+    custom_files:
+      - tools/telegram_send_sticker_tool.py
+      - tests/tools/test_telegram_send_sticker_tool.py
+      - gateway/sticker_cache.py
+      - gateway/platforms/telegram.py
+    upstream_issue: 16168
+    on_upstream_issue_closed: alert
+    notes: >
+      Extends sticker_cache to store file_id on inbound stickers.
+      Telegram adapter passes file_id when caching. New send_sticker tool
+      makes direct sendSticker Bot API call.
