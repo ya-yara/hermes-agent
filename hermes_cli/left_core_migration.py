@@ -44,7 +44,7 @@ from typing import Callable, Optional
 
 from hermes_cli.memory_provider_migration import (
     _failed_recently, _home_consent, _home_label, _install_command, _interactive,
-    _note_failure, _unattended_consent,
+    _note_failure, _unattended_consent, kept_off_sentence,
 )
 from hermes_cli._startup_fast import project_root_str
 
@@ -67,38 +67,11 @@ def _read_config(home: Path) -> dict:
 
 
 def _merged_platform_block(home: Path, name: str) -> Optional[dict]:
-    """Platform *name*'s block as the gateway loader merges it for *home*: legacy ``gateway.json`` base
-    layer, then config.yaml's ``gateway.platforms`` / ``platforms`` / ``gateway.<name>`` blocks and a top-level
-    ``<name>:`` block in the loader's order (managed overlay and ``${VAR}`` applied). ``None`` when no layer names it."""
+    """Platform *name*'s block as the gateway loader builds it for *home* (``config_loader.platform_blocks``,
+    the one normalized view: key case and aliases, every layer, the malformed-layer fallback); ``None`` when no
+    layer names it. Its ``gateway.<name>`` shorthand counts before the platform's plugin registers."""
     from gateway import config_loader
-    gw_data = config_loader.load_legacy_gateway_json(home)
-    gw_data = gw_data if isinstance(gw_data, dict) else {}
-    try:
-        from hermes_cli import managed_scope
-        yaml_cfg = config_loader.read_yaml_layers(home)
-        managed = managed_scope.apply_managed_overlay({})
-    except Exception:  # malformed config.yaml: the gateway falls back to gateway.json alone too
-        logger.debug("left-core: unreadable config for %s", home, exc_info=True)
-        yaml_cfg, managed = {}, {}
-    yaml_cfg = yaml_cfg if isinstance(yaml_cfg, dict) else {}
-    platforms = config_loader.merge_platform_sections(
-        yaml_cfg, yaml_cfg.get("gateway"), gw_data, also=frozenset({name}))
-    authored = config_loader.snapshot_authored_extra(config_loader.merge_platform_sections(
-        yaml_cfg, yaml_cfg.get("gateway"), {}, also=frozenset({name})))
-    # Reconcile cross-shape pins before the root bridge, even before this platform is registered.
-    managed["platforms"] = config_loader.merge_platform_sections(
-        managed, managed.get("gateway"), {}, also=frozenset({name}))
-    config_loader._apply_managed_extra(authored, managed, platforms)
-    block = platforms.get(name)
-    root = yaml_cfg.get(name)
-    if isinstance(root, dict):  # a top-level ``<name>:`` block, bridged as bridge_platform_shared_keys does: its
-        from gateway.config import PlatformConfig  # adapter keys beat gateway.json's extra, not config.yaml's nested one
-        block = dict(block) if isinstance(block, dict) else {}
-        block["extra"] = {**(block.get("extra") or {}), **PlatformConfig.from_dict({**root, "home_channel": None}).extra,
-                          **authored.get(name, {})}  # a home_channel names a plugin's Platform
-        if "enabled" in root:  # and its enabled wins
-            block["enabled"] = root["enabled"]
-    return block if isinstance(block, dict) else None
+    return config_loader.platform_blocks(home, also=frozenset({name})).get(name)
 
 
 def platform_configured_on(home: Path, name: str) -> bool:
@@ -214,11 +187,8 @@ _YUANBAO_NOTICE = ("Yuanbao is now a Hermes Labs plugin: built by Nous Research,
 
 
 def _yuanbao_notice(home: Path, *, process_env: bool = False) -> str:
-    # Core's adapter ignored a bare ``yuanbao`` there; the catalog plugin does not. The install's enable
-    # purges the entry from the user's list, so this fires only when it survived (a managed overlay pin).
-    if plugin_present("yuanbao", home) and _plugins_listed(home, ("yuanbao",))[1]:
-        return (f"{_YUANBAO_NOTICE} plugins.disabled lists 'yuanbao', which now turns Yuanbao off; "
-                "remove it to keep using Yuanbao.")
+    # Core's adapter ignored a bare ``yuanbao`` in plugins.disabled; the catalog plugin does not, and the
+    # automatic install keeps the entry: its kept-off notice (_install_locked) names the enable command.
     return _YUANBAO_NOTICE
 
 
@@ -239,9 +209,11 @@ def spotify_in_use(home: Path, *, process_env: bool = False) -> bool:
     return _toolset_listed(_read_config(home), frozenset({"spotify"}))
 
 
-def _plugins_listed(home: Path, names: tuple[str, ...]) -> tuple[bool, bool]:
-    """Whether a name in *names* is in *home*'s ``plugins.enabled`` / ``plugins.disabled``, read with the
-    managed overlay applied like the loader's config, so an administrator's pinned list counts."""
+def _plugins_listed(home: Path, identity) -> tuple[bool, bool]:
+    """Whether *home*'s ``plugins.enabled`` / ``plugins.disabled`` name the plugin with *identity*
+    (``plugin_identity.plugin_listed``, the loader's rule), read with the managed overlay applied like the
+    loader's config, so an administrator's pinned list counts."""
+    from hermes_cli.plugin_identity import plugin_listed
     from gateway import config_loader
     try:
         plugins = config_loader.read_yaml_layers(home).get("plugins")
@@ -250,17 +222,21 @@ def _plugins_listed(home: Path, names: tuple[str, ...]) -> tuple[bool, bool]:
         return False, False
     plugins = plugins if isinstance(plugins, dict) else {}
 
-    def listed(key: str) -> bool:
-        entries = plugins.get(key)
-        return isinstance(entries, list) and any(str(n) in names for n in entries)
-    return listed("enabled"), listed("disabled")
+    identity = frozenset(identity)
+    return plugin_listed(identity, plugins.get("enabled")), plugin_listed(identity, plugins.get("disabled"))
 
 
 def _plugin_lists(home: Path, plugin: str, *, also: tuple[str, ...] = ()) -> tuple[bool, bool]:
-    """Whether *plugin*'s key or name (or a name in *also*) is in *home*'s ``plugins.enabled`` /
-    ``plugins.disabled`` (:func:`_plugins_listed`)."""
-    feature = next(f for f in LEFT_CORE if f.plugin == plugin)
-    return _plugins_listed(home, (feature.plugin_key, *feature.plugin_names, feature.plugin, *also))
+    """Whether catalog *plugin* (by its catalog name or a core-era key, ``plugin_identity``) or a name in
+    *also* is in *home*'s ``plugins.enabled`` / ``plugins.disabled`` (:func:`_plugins_listed`)."""
+    from hermes_cli.plugin_identity import plugin_identity
+    return _plugins_listed(home, plugin_identity(plugin) | set(also))
+
+
+def _tree_lists(home: Path, plugin: str) -> tuple[bool, bool]:
+    """:func:`_plugins_listed` for the tree *home* has for *plugin*, by the names the loader gives that tree."""
+    from hermes_cli.plugin_identity import tree_identity
+    return _plugins_listed(home, tree_identity(home / "plugins", home / "plugins" / plugin, default=plugin))
 
 
 def _bundled_plugin_selected(home: Path, plugin: str) -> bool:
@@ -1036,7 +1012,7 @@ def _installed_for_good(home: Path, plugin: str) -> bool:
     nobody enabled or disabled since (that one is owed, and the next attempt enables it in place)."""
     if not plugin_present(plugin, home):
         return False
-    return not _placed(home, plugin).exists() or any(_plugins_listed(home, (plugin,)))
+    return not _placed(home, plugin).exists() or any(_tree_lists(home, plugin))
 
 
 def _core_carried(feature: LeftCoreFeature, selection: list) -> bool:
@@ -1264,7 +1240,11 @@ def _noticed(message: str, home: Path, feature: LeftCoreFeature, process_env: bo
 
 
 def _install_into(home: Path, *, consent: Optional[bool] = None) -> Callable[[str], dict]:
-    def _install(name: str, discard: Optional[Path] = None) -> dict:
+    """The unattended install both automatic installers (this migrator, ``default_plugins``) run in *home*.
+    A plugin *home*'s ``plugins.disabled`` names when the enable runs (also an entry the operator wrote while
+    the download ran) is placed but left off (``kept_disabled``): only the user's own enable lifts it."""
+    def _install(name: str, discard: Optional[Path] = None,
+                 on_step: Optional[Callable[[object], None]] = None) -> dict:
         from hermes_cli.plugins_cmd import dashboard_install_plugin
         from hermes_constants import reset_hermes_home_override, set_hermes_home_override
         token = set_hermes_home_override(home)
@@ -1272,9 +1252,9 @@ def _install_into(home: Path, *, consent: Optional[bool] = None) -> Callable[[st
             if discard is not None:  # the caller's own leftover tree, removed under this same binding
                 from hermes_cli.plugins_cmd_remove import _remove_plugin_core
                 _remove_plugin_core(discard)
-            return dashboard_install_plugin("", force=False, enable=True, catalog_name=name,
+            return dashboard_install_plugin("", force=False, enable=True, catalog_name=name, unattended=True,
                                             assume_deps_consent=_unattended_consent() if consent is None
-                                            else consent)
+                                            else consent, on_step=on_step)
         finally:
             reset_hermes_home_override(token)
     return _install
@@ -1339,6 +1319,11 @@ def _install_locked(home: Path, feature: LeftCoreFeature, *, install: Callable[[
     if result.get("ok"):
         _placed(home, feature.plugin).unlink(missing_ok=True)
         _record_installed(home, feature)
+        if result.get("kept_disabled"):
+            say(_noticed(f"  ⚠ {feature.label}: installed the '{feature.plugin}' plugin from the catalog "
+                         f"({feature.unchanged}), but {kept_off_sentence(feature.plugin, home)}",
+                         home, feature, process_env))
+            return True
         say(_noticed(f"  ✓ Installed the '{feature.plugin}' plugin from the catalog for {feature.label}, which this "
                      f"profile is set up for ({feature.unchanged})." if default else
                      f"  ✓ {feature.label} moved out of core — installed the '{feature.plugin}' plugin from the "
@@ -1550,8 +1535,9 @@ def _attempt(home: Path, *, deliver: Callable[[str], None], gateway_start: bool,
             if _install_one(home, feature, install=_install_into(home, consent=True), say=report, process_env=True,
                             wait=startup_lock_wait(gateway_start=gateway_start)):
                 installed.append(feature.plugin)
-                if not gateway_start and feature.platform and _gateway_serves(home) \
-                        and not _running_gateway_serves(home, feature.platform):
+                # A plugin the install kept off (plugins.disabled) is served by no restart: its notice said so.
+                if not gateway_start and feature.platform and not _plugin_lists(home, feature.plugin)[1] \
+                        and _gateway_serves(home) and not _running_gateway_serves(home, feature.platform):
                     report(f"Restart the gateway (`hermes gateway restart`) so it serves {feature.label}.")
         return installed
     except Exception as exc:  # never take agent/gateway start down

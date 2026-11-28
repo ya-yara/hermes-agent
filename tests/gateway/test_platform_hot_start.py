@@ -15,6 +15,7 @@ import pytest
 from gateway.config import Platform, PlatformConfig
 from tests.gateway.test_multiplex_hot_serve_live import control, start_daemon, stop, tail
 from tests.waiting import wait_until
+from tests.fixtures.child_env import hermes_child_env
 
 
 def _free_port():
@@ -47,7 +48,7 @@ def test_single_profile_gateway_starts_restarts_and_stops_a_platform_live(tmp_pa
     root.mkdir(mode=0o700)
     (root / "config.yaml").write_text("gateway:\n  multiplex_profiles: false\n", encoding="utf-8")
     repo = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(repo), PYTHONUNBUFFERED="1")
     mux = {"root": root, "env": env, "log": tmp_path / "gateway.log"}
     proc, _desc = start_daemon(mux)
@@ -87,7 +88,7 @@ def test_a_platform_configured_by_the_launch_environment_survives_a_reconcile(tm
     (root / "config.yaml").write_text("gateway:\n  multiplex_profiles: false\n", encoding="utf-8")
     port = _free_port()
     repo = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(repo), PYTHONUNBUFFERED="1",
                WEBHOOK_ENABLED="true", WEBHOOK_PORT=str(port))
     mux = {"root": root, "env": env, "log": tmp_path / "gateway.log"}
@@ -123,7 +124,7 @@ def test_named_profile_restart_with_the_same_token_comes_back_up_live(tmp_path):
     dotenv = named / ".env"
     dotenv.write_text("LINE_CHANNEL_ACCESS_TOKEN=same-token\nLINE_CHANNEL_SECRET=first\n", encoding="utf-8")
     repo = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     closed = _closed_port()
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(repo), PYTHONUNBUFFERED="1",
                HERMES_GATEWAY_LOCK_DIR=str(tmp_path / "locks"), HTTPS_PROXY=closed, HTTP_PROXY=closed,
@@ -157,7 +158,7 @@ def test_a_named_profile_rescan_leaves_its_restart_for_the_next_answer(tmp_path)
     (named / "config.yaml").write_text("platforms:\n  line:\n    token: same-token\n", encoding="utf-8")
     dotenv = named / ".env"
     dotenv.write_text("LINE_CHANNEL_ACCESS_TOKEN=same-token\nLINE_CHANNEL_SECRET=first\n", encoding="utf-8")
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     closed = _closed_port()
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(Path(__file__).resolve().parents[2]),
                PYTHONUNBUFFERED="1", HERMES_GATEWAY_LOCK_DIR=str(tmp_path / "locks"), HTTPS_PROXY=closed,
@@ -869,7 +870,7 @@ def test_an_unreadable_config_keeps_the_running_platforms_until_it_is_fixed(tmp_
     config = root / "config.yaml"
     config.write_text(_webhook_yaml(first), encoding="utf-8")
     repo = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(repo), PYTHONUNBUFFERED="1")
     mux = {"root": root, "env": env, "log": tmp_path / "gateway.log"}
     proc, _desc = start_daemon(mux)
@@ -911,7 +912,7 @@ def test_an_unreadable_named_profile_config_keeps_its_platforms(tmp_path):
     (named / "config.yaml").write_text(good, encoding="utf-8")
     (named / ".env").write_text("LINE_CHANNEL_ACCESS_TOKEN=same-token\nLINE_CHANNEL_SECRET=s\n", encoding="utf-8")
     repo = Path(__file__).resolve().parents[2]
-    env = {k: os.environ[k] for k in ("PATH", "LANG", "TZ") if k in os.environ}
+    env = hermes_child_env(("PATH", "LANG", "TZ"))
     closed = _closed_port()
     env.update(HOME=str(user), HERMES_HOME=str(root), PYTHONPATH=str(repo), PYTHONUNBUFFERED="1",
                HERMES_GATEWAY_LOCK_DIR=str(tmp_path / "locks"), HTTPS_PROXY=closed, HTTP_PROXY=closed,
@@ -957,3 +958,38 @@ def test_a_home_channel_change_is_live_without_a_reconnect(tmp_path, monkeypatch
     assert runner.adapters[Platform.WEBHOOK] is live  # not rebuilt
     assert runner.delivery_router.config.get_home_channel(Platform.WEBHOOK).chat_id == "new"
     assert live.config.home_channel.chat_id == "new"
+
+
+def test_explicit_gateway_config_is_not_reconciled_from_home_files(tmp_path, monkeypatch):
+    """A ``GatewayRunner`` launched with an explicit ``GatewayConfig`` (``gateway --config <file>`` or
+    programmatic injection) is not backed by ``$HERMES_HOME/config.yaml``: unrelated writes to the home's
+    config (such as onboarding state on the first turn) must never retire or rebuild its adapters."""
+    from gateway.config import GatewayConfig
+    from gateway.run import GatewayRunner
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text("platforms: {}\n", encoding="utf-8")
+    explicit = GatewayConfig(platforms={Platform.WEBHOOK: PlatformConfig(enabled=True, token="explicit-token")})
+    runner = GatewayRunner(explicit)
+    live = types.SimpleNamespace(config=runner.config.platforms[Platform.WEBHOOK])
+    runner.adapters[Platform.WEBHOOK] = live
+    runner._primary_build_prints = {
+        Platform.WEBHOOK: runner._primary_build_print(Platform.WEBHOOK, runner.config.platforms[Platform.WEBHOOK])}
+    runner._running = True
+    retired: list[Platform] = []
+
+    async def _retire(platform):
+        retired.append(platform)
+        runner.adapters.pop(platform, None)
+
+    runner._retire_primary_platform = _retire
+    asyncio.run(runner._note_boot_platform_signature())
+    # First turn writes unrelated state into $HERMES_HOME/config.yaml.
+    (tmp_path / "config.yaml").write_text("onboarding:\n  seen:\n    profile_build_offered: true\n", encoding="utf-8")
+
+    asyncio.run(runner._reconcile_primary_platforms_if_changed(reason="watcher"))
+    assert retired == [] and runner.adapters.get(Platform.WEBHOOK) is live
+
+    answer = asyncio.run(runner.reconcile_profile_platforms(None, reason="control-socket"))
+    assert answer["applied"] is True and answer["changed"] is False and answer["stopped"] == [], answer
+    assert retired == [] and runner.adapters.get(Platform.WEBHOOK) is live

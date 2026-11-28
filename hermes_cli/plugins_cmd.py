@@ -573,8 +573,8 @@ def _plugin_aliases(key: str, entries: Optional[list] = None) -> set:
     The loader matches BOTH the canonical key (``web/firecrawl``) and the manifest name
     (``web-firecrawl``), so a stale entry under any form vetoes an enable ("explicit disable wins").
     Pass *entries* to reuse one :func:`_discover_all_plugins` scan across several keys."""
-    from hermes_cli.left_core_migration import legacy_plugin_keys
-    names = {key, key.split("/")[-1], *legacy_plugin_keys(key)}
+    from hermes_cli.plugin_identity import plugin_identity
+    names = {key.split("/")[-1], *plugin_identity(key)}
     names.update(e[0] for e in (_discover_all_plugins() if entries is None else entries) if e[5] == key)
     return names
 
@@ -648,9 +648,12 @@ def _selection_lock() -> threading.Lock:
         return _SELECTION_LOCKS.setdefault(hermes_home_key(), threading.Lock())
 
 
-def _set_plugin_enabled(name: str, *, enable: bool, aliases=(), console=None) -> None:
+def _set_plugin_enabled(name: str, *, enable: bool, aliases=(), console=None, unless_disabled: bool = False) -> bool:
     """Submit the command's delta with the version of the selection it read. Enabling a non-bundled plugin
-    on the kill list raises :class:`PluginOperationError`; the `hermes plugins` picker checks it itself."""
+    on the kill list raises :class:`PluginOperationError`; the `hermes plugins` picker checks it itself.
+    *unless_disabled* (an unattended install) writes nothing and returns False when ``plugins.disabled``
+    names *name* in the selection this write is versioned against: a disable another writer lands after
+    that read races the write, so the retry reads it. True once written."""
     from pm.plugins_state import read_home_selection
 
     if enable:
@@ -661,11 +664,14 @@ def _set_plugin_enabled(name: str, *, enable: bool, aliases=(), console=None) ->
         plugins = config.get("plugins") or {}
         enabled = set(plugins.get("enabled") or ())
         disabled = set(plugins.get("disabled") or ())
+        if unless_disabled and disabled & {*_plugin_aliases(name), *aliases}:
+            return False
         _apply_activation(enabled, disabled, name, aliases, enable=enable)
         _admit_and_save_plugin_sets(enabled, disabled, console=console,
                                    action=f"{'Enable' if enable else 'Disable'} '{name}'",
                                    expected_config=expected_config, plugin=name if enable else None,
                                    settled=(name, *aliases))
+    return True
 
 
 def _refuse_recalled_entry(entry: Optional[tuple]) -> None:
@@ -938,10 +944,11 @@ def _plugin_status(name: str, enabled: set, disabled: set, key: str = "", *, sou
     disable wins, then the allow-list, then the activations that need no list entry — bundled
     backends/platforms and model providers from any source (*source* + *dir_path*) and category-selected providers
     (*active*, see :func:`_category_active_names`)."""
-    names = {name, key}
-    if names & disabled:
+    from hermes_cli.plugin_identity import plugin_identity, plugin_listed
+    names = plugin_identity(key or name, name)  # the loader's rule (``gate_manifest``)
+    if plugin_listed(names, disabled):
         return "disabled"
-    if names & enabled or names & active:
+    if plugin_listed(names, enabled) or names & active:
         return "enabled"
     if dir_path is not None and _default_on(dir_path, source):
         return "enabled"
